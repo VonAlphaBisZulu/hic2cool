@@ -159,14 +159,14 @@ def read_footer(f, buf, footerPosition):
             f.seek(nNormalizationFactors * 8, 1)
         else:
             nValues = struct.unpack(b'<i', f.read(4))[0]
-            expected[normtype, unit, binsize] = np.frombuffer(
+            expected['RAW', unit, binsize] = np.frombuffer(
                 buf,
-                dtype='<d',
+                dtype=np.dtype('<d'),
                 count=nValues,
                 offset=f.tell())
             f.seek(nValues * 8, 1)
             nNormalizationFactors = struct.unpack(b'<i', f.read(4))[0]
-            factors[normtype, unit, binsize] = np.frombuffer(
+            factors['RAW', unit, binsize] = np.frombuffer(
                 buf,
                 dtype={'names':['chrom','factor'], 'formats':['<i', '<d']},
                 count=nNormalizationFactors,
@@ -280,7 +280,6 @@ def read_block(req, block_record):
     binX = block['bin1_id']
     binY = block['bin2_id']
     counts = block['count']
-
     if (version < 7):
         for i in range(nRecords):
             x = struct.unpack(b'<i', uncompressedBytes[(12*i+4):(12*i+8)])[0]

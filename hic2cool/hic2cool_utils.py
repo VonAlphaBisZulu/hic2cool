@@ -432,8 +432,12 @@ def read_block(req, block_record):
 def read_normalization_vector(f, buf, entry):
     filepos = entry['filepos']
     f.seek(filepos)
-    nValues = struct.unpack(b'<i', f.read(4))[0]
-    return np.frombuffer(buf, dtype=np.dtype('<d'), count=nValues, offset=filepos+4)
+    if version >= 9:
+        nValues = struct.unpack(b'<q', f.read(8))[0]
+        return np.frombuffer(buf, dtype=np.dtype('<f'), count=nValues, offset=filepos+8)
+    else:
+        nValues = struct.unpack(b'<i', f.read(4))[0]
+        return np.frombuffer(buf, dtype=np.dtype('<d'), count=nValues, offset=filepos+4)
 
 
 def parse_hic(infile, pool, nproc, chr_key, unit, binsize, pair_footer_info,

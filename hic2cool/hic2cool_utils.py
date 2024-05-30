@@ -75,16 +75,17 @@ def read_header(req):
     magic_string = struct.unpack(b'<3s', req.read(3))[0]
     req.read(1)
     if magic_string != b"HIC":
-        error_string = 'This does not appear to be a HiC file; magic string is incorrect'
+        error_string = '... This does not appear to be a HiC file; magic string is incorrect'
         force_exit(error_string, req)
     global version
     version = struct.unpack(b'<i', req.read(4))[0]
     footerPosition = struct.unpack(b'<q', req.read(8))[0]
-    genome = ""
+    genome = b""
     c = req.read(1)
     while c != b'\0':
-        genome += c.decode('ascii')
+        genome += c
         c = req.read(1)
+    genome = genome.decode('ascii')
     if version >= 9:
         frag_resolutions = []
         normVectorIndexPosition = struct.unpack('<q', req.read(8))[0]
@@ -99,8 +100,12 @@ def read_header(req):
     nChrs = struct.unpack(b'<i', req.read(4))[0]
     for i in range(nChrs):
         name = readcstr(req)
-        length = struct.unpack(b'<q', req.read(8))[0]
-        chrs[i] = [i, name, length]
+        if version >= 9:
+            length = struct.unpack(b'<q', req.read(8))[0]
+        else:
+            length = struct.unpack(b'<i', req.read(4))[0]
+        if name and length:
+            chrs[i] = [i, name, length]
 
     nBpRes = struct.unpack(b'<i', req.read(4))[0]
     for _ in range(nBpRes):
@@ -112,16 +117,16 @@ def read_header(req):
         res = struct.unpack(b'<i', req.read(4))[0]
         frag_resolutions.append(res)
 
-    # return chrs, resolutions, footerPosition, genome, metadata
-
-
-    return chrs, resolutions, frag_resolutions, footerPosition, normVectorIndexPosition, normVectorIndexLength, genome, metadata
+    return chrs, resolutions, footerPosition, genome, metadata
 
 def read_footer(f, buf, footerPosition):
     f.seek(footerPosition)
 
     cpair_info = {}
-    nBytes = struct.unpack(b'<q', f.read(8))[0]
+    if version >= 9:
+        nBytes = struct.unpack(b'<q', f.read(8))[0]
+    else:
+        nBytes = struct.unpack(b'<i', f.read(4))[0]
     nEntries = struct.unpack(b'<i', f.read(4))[0]
     for _ in range(nEntries):
         key = readcstr(f)
@@ -137,27 +142,44 @@ def read_footer(f, buf, footerPosition):
     for _ in range(nExpectedValues):
         unit = readcstr(f)
         binsize = struct.unpack(b'<i', f.read(4))[0]
-
-        nValues = struct.unpack(b'<q', f.read(8))[0]
-        expected['RAW', unit, binsize] = np.frombuffer(
-            buf,
-            dtype=np.dtype('<f'),
-            count=nValues,
-            offset=f.tell())
-        f.seek(nValues * 4, 1)
-        
-        nNormalizationFactors = struct.unpack(b'<i', f.read(4))[0]
-        factors['RAW', unit, binsize] = np.frombuffer(
-            buf,
-            dtype={'names':['chrom','factor'], 'formats':['<i', '<f']},
-            count=nNormalizationFactors,
-            offset=f.tell())
-        f.seek(nNormalizationFactors * 8, 1)
+        if version >= 9:
+            nValues = struct.unpack(b'<q', f.read(8))[0]
+            expected['RAW', unit, binsize] = np.frombuffer(
+                buf,
+                dtype='<f',
+                count=nValues,
+                offset=f.tell())
+            f.seek(nValues * 4, 1)
+            nNormalizationFactors = struct.unpack(b'<i', f.read(4))[0]
+            factors['RAW', unit, binsize] = np.frombuffer(
+                buf,
+                dtype={'names':['chrom','factor'], 'formats':['<i', '<f']},
+                count=nNormalizationFactors,
+                offset=f.tell())
+            f.seek(nNormalizationFactors * 8, 1)
+        else:
+            nValues = struct.unpack(b'<i', f.read(4))[0]
+            expected[normtype, unit, binsize] = np.frombuffer(
+                buf,
+                dtype='<d',
+                count=nValues,
+                offset=f.tell())
+            f.seek(nValues * 8, 1)
+            nNormalizationFactors = struct.unpack(b'<i', f.read(4))[0]
+            factors[normtype, unit, binsize] = np.frombuffer(
+                buf,
+                dtype={'names':['chrom','factor'], 'formats':['<i', '<d']},
+                count=nNormalizationFactors,
+                offset=f.tell())
+            f.seek(nNormalizationFactors * 12, 1)
+            
     # normalized (norm != 'NONE')
     possibleNorms = f.read(4)
     if not possibleNorms:
         print_stderr('!!! WARNING. No normalization vectors found in the hic file.')
         return cpair_info, expected, factors, norm_info
+    
+    
     nExpectedValues = struct.unpack(b'<i', possibleNorms)[0]
     for _ in range(nExpectedValues):
         normtype = readcstr(f)
@@ -165,22 +187,36 @@ def read_footer(f, buf, footerPosition):
             NORMS.append(normtype)
         unit = readcstr(f)
         binsize = struct.unpack(b'<i', f.read(4))[0]
-
-        nValues = struct.unpack(b'<q', f.read(8))[0]
-        expected[normtype, unit, binsize] = np.frombuffer(
-            buf,
-            dtype='<f',
-            count=nValues,
-            offset=f.tell())
-        f.seek(nValues * 4, 1)
-
-        nNormalizationFactors = struct.unpack(b'<i', f.read(4))[0]
-        factors[normtype, unit, binsize] = np.frombuffer(
-            buf,
-            dtype={'names':['chrom','factor'], 'formats':['<i', '<f']},
-            count=nNormalizationFactors,
-            offset=f.tell())
-        f.seek(nNormalizationFactors * 8, 1)
+        if version >= 9:
+            nValues = struct.unpack(b'<q', f.read(8))[0]
+            expected[normtype, unit, binsize] = np.frombuffer(
+                buf,
+                dtype='<f',
+                count=nValues,
+                offset=f.tell())
+            f.seek(nValues * 4, 1)
+            nNormalizationFactors = struct.unpack(b'<i', f.read(4))[0]
+            factors[normtype, unit, binsize] = np.frombuffer(
+                buf,
+                dtype={'names':['chrom','factor'], 'formats':['<i', '<f']},
+                count=nNormalizationFactors,
+                offset=f.tell())
+            f.seek(nNormalizationFactors * 8, 1)
+        else:
+            nValues = struct.unpack(b'<i', f.read(4))[0]
+            expected['RAW', unit, binsize] = np.frombuffer(
+                buf,
+                dtype=np.dtype('<d'),
+                count=nValues,
+                offset=f.tell())
+            f.seek(nValues * 8, 1)
+            nNormalizationFactors = struct.unpack(b'<i', f.read(4))[0]
+            factors['RAW', unit, binsize] = np.frombuffer(
+                buf,
+                dtype={'names':['chrom','factor'], 'formats':['<i', '<d']},
+                count=nNormalizationFactors,
+                offset=f.tell())
+            f.seek(nNormalizationFactors * 12, 1)
 
     nEntries = struct.unpack(b'<i', f.read(4))[0]
     for _ in range(nEntries):
@@ -189,7 +225,10 @@ def read_footer(f, buf, footerPosition):
         unit = readcstr(f)
         resolution = struct.unpack(b'<i', f.read(4))[0]
         filePosition = struct.unpack(b'<q', f.read(8))[0]
-        sizeInBytes = struct.unpack(b'<q', f.read(8))[0]
+        if version >= 9:
+            sizeInBytes = struct.unpack(b'<q', f.read(8))[0]
+        else:
+            sizeInBytes = struct.unpack(b'<i', f.read(4))[0]
         norm_info[normtype, unit, resolution, chrIdx] = {
             'filepos': filePosition,
             'size': sizeInBytes
@@ -242,86 +281,151 @@ def read_block(req, block_record):
     binY = block['bin2_id']
     counts = block['count']
 
-    binXOffset = struct.unpack(b'<i', uncompressedBytes[4:8])[0]
-    binYOffset = struct.unpack(b'<i', uncompressedBytes[8:12])[0]
-    useFloatContact = struct.unpack(b'<b', uncompressedBytes[12:13])[0]
-    useIntXPos = struct.unpack(b'<b', uncompressedBytes[13:14])[0]
-    useIntYPos = struct.unpack(b'<b', uncompressedBytes[14:15])[0]
-    type_ = struct.unpack(b'<b', uncompressedBytes[15:16])[0]
-    k = 0
-    if (type_ == 1):
-        # Get number of rows
-        if (useIntYPos==0):
-            rowCount = struct.unpack(b'<h', uncompressedBytes[16:18])[0]
-            temp = 18
-        else:
-            rowCount = struct.unpack(b'<i', uncompressedBytes[16:20])[0]
-            temp = 20
-        # Iterate throught rows
-        for i in range(rowCount):
-            # Get row number
+    if (version < 7):
+        for i in range(nRecords):
+            x = struct.unpack(b'<i', uncompressedBytes[(12*i+4):(12*i+8)])[0]
+            y = struct.unpack(b'<i', uncompressedBytes[(12*i+8):(12*i+12)])[0]
+            c = struct.unpack(b'<f', uncompressedBytes[(12*i+12):(12*i+16)])[0]
+            binX[i] = x
+            binY[i] = y
+            counts[i] = c
+    elif (version >= 9):
+        binXOffset = struct.unpack(b'<i', uncompressedBytes[4:8])[0]
+        binYOffset = struct.unpack(b'<i', uncompressedBytes[8:12])[0]
+        useFloatContact = struct.unpack(b'<b', uncompressedBytes[12:13])[0]
+        useIntXPos = struct.unpack(b'<b', uncompressedBytes[13:14])[0]
+        useIntYPos = struct.unpack(b'<b', uncompressedBytes[14:15])[0]
+        type_ = struct.unpack(b'<b', uncompressedBytes[15:16])[0]
+        k = 0
+        if (type_ == 1):
+            # Get number of rows
             if (useIntYPos==0):
-                rowNumber = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
-                temp += 2
-                rowNumber += binYOffset
+                rowCount = struct.unpack(b'<h', uncompressedBytes[16:18])[0]
+                temp = 18
             else:
-                rowNumber = struct.unpack(b'<i', uncompressedBytes[temp:(temp+4)])[0]
-                temp += 4
-                rowNumber += binYOffset
-            # Get column numbers
-            if (useIntXPos==0):
-                recordCount = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
-                temp += 2
-            else:
-                recordCount = struct.unpack(b'<i', uncompressedBytes[temp:(temp+4)])[0]
-                temp += 4
-            # Iterate throught columns of specific row
-            for _ in range(recordCount):
+                rowCount = struct.unpack(b'<i', uncompressedBytes[16:20])[0]
+                temp = 20
+            # Iterate throught rows
+            for i in range(rowCount):
+                # Get row number
+                if (useIntYPos==0):
+                    rowNumber = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
+                    temp += 2
+                    rowNumber += binYOffset
+                else:
+                    rowNumber = struct.unpack(b'<i', uncompressedBytes[temp:(temp+4)])[0]
+                    temp += 4
+                    rowNumber += binYOffset
+                # Get column numbers
                 if (useIntXPos==0):
-                    binColumn = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
-                    binColumn += binXOffset
+                    recordCount = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
                     temp += 2
                 else:
-                    binColumn = struct.unpack(b'<i', uncompressedBytes[temp:(temp+4)])[0]
-                    binColumn += binXOffset
+                    recordCount = struct.unpack(b'<i', uncompressedBytes[temp:(temp+4)])[0]
                     temp += 4
-                if (useFloatContact==0):
+                # Iterate throught columns of specific row
+                for _ in range(recordCount):
+                    if (useIntXPos==0):
+                        binColumn = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
+                        binColumn += binXOffset
+                        temp += 2
+                    else:
+                        binColumn = struct.unpack(b'<i', uncompressedBytes[temp:(temp+4)])[0]
+                        binColumn += binXOffset
+                        temp += 4
+                    if (useFloatContact==0):
+                        c = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
+                        temp += 2
+                    else:
+                        c = struct.unpack(b'<f', uncompressedBytes[temp:(temp+4)])[0]
+                        temp += 4
+                    binX[k] = binColumn
+                    binY[k] = rowNumber
+                    counts[k] = c
+                    k += 1
+        elif (type_== 2):
+            temp = 14
+            nPts = struct.unpack(b'<i', uncompressedBytes[temp:(temp+4)])[0]
+            temp += 4
+            w = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
+            temp += 2
+            for i in range(nPts):
+                row = int(i / w)
+                col = i - row * w
+                x = int(binXOffset + col)
+                y = int(binYOffset + row)
+                if useFloatContact == 0:
                     c = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
-                    temp += 2
+                    temp = temp+2
+                    if c != -32768:
+                        binX[k] = x
+                        binY[k] = y
+                        counts[k] = c
+                        k += 1
                 else:
-                    c = struct.unpack(b'<f', uncompressedBytes[temp:(temp+4)])[0]
-                    temp += 4
-                binX[k] = binColumn
-                binY[k] = rowNumber
-                counts[k] = c
-                k += 1
-    elif (type_== 2):
-        temp = 14
-        nPts = struct.unpack(b'<i', uncompressedBytes[temp:(temp+4)])[0]
-        temp += 4
-        w = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
-        temp += 2
-        for i in range(nPts):
-            row = int(i / w)
-            col = i - row * w
-            x = int(binXOffset + col)
-            y = int(binYOffset + row)
-            if useFloatContact == 0:
-                c = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
+                    c = struct.unpack(b'<f',uncompressedBytes[temp:(temp+4)])[0]
+                    temp=temp+4
+                    if c != 0x7fc00000 and not math.isnan(c):
+                        binX[k] = x
+                        binY[k] = y
+                        counts[k] = c
+                        k += 1
+    else:
+        binXOffset = struct.unpack(b'<i', uncompressedBytes[4:8])[0]
+        binYOffset = struct.unpack(b'<i', uncompressedBytes[8:12])[0]
+        useShort = struct.unpack(b'<b', uncompressedBytes[12:13])[0]
+        type_ = struct.unpack(b'<b', uncompressedBytes[13:14])[0]
+        k = 0
+        if (type_ == 1):
+            rowCount = struct.unpack(b'<h', uncompressedBytes[14:16])[0]
+            temp = 16
+            for i in range(rowCount):
+                y = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
                 temp = temp+2
-                if c != -32768:
+                y += binYOffset
+                colCount = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
+                temp = temp+2
+                for j in range(colCount):
+                    x = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
+                    temp = temp+2
+                    x += binXOffset
+                    if (useShort==0):
+                        c = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
+                        temp = temp+2
+                    else:
+                        c = struct.unpack(b'<f', uncompressedBytes[temp:(temp+4)])[0]
+                        temp = temp+4
                     binX[k] = x
                     binY[k] = y
                     counts[k] = c
                     k += 1
-            else:
-                c = struct.unpack(b'<f',uncompressedBytes[temp:(temp+4)])[0]
-                temp=temp+4
-                if c != 0x7fc00000 and not math.isnan(c):
-                    binX[k] = x
-                    binY[k] = y
-                    counts[k] = c
-                    k += 1
+        elif (type_== 2):
+            temp = 14
+            nPts = struct.unpack(b'<i', uncompressedBytes[temp:(temp+4)])[0]
+            temp = temp+4
+            w = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
+            temp = temp+2
+            for i in range(nPts):
+                row = int(i / w)
+                col = i - row * w
+                x = int(binXOffset + col)
+                y = int(binYOffset + row)
+                if useShort == 0:
+                    c = struct.unpack(b'<h', uncompressedBytes[temp:(temp+2)])[0]
+                    temp = temp+2
+                    if c != -32768:
+                        binX[k] = x
+                        binY[k] = y
+                        counts[k] = c
+                        k += 1
+                else:
+                    c = struct.unpack(b'<f',uncompressedBytes[temp:(temp+4)])[0]
+                    temp=temp+4
+                    if c != 0x7fc00000 and not math.isnan(c):
+                        binX[k] = x
+                        binY[k] = y
+                        counts[k] = c
+                        k += 1
     del uncompressedBytes
     return block
 
@@ -880,7 +984,7 @@ def hic2cool_convert(infile, outfile, resolution=0, nproc=1, show_warnings=False
     for i in range(0, nproc):
         reqarr.append(open(infile, 'rb'))
     mmap_buf = mmap.mmap(req.fileno(), 0, access=mmap.ACCESS_READ)
-    used_chrs, resolutions, frag_resolutions, footerPosition, normVectorIndexPosition, normVectorIndexLength, genome, metadata = read_header(req)
+    used_chrs, resolutions, footerPosition, genome, metadata = read_header(req)
     pair_footer_info, expected, factors, norm_info = read_footer(req, mmap_buf, footerPosition)
     # expected/factors unused for now
     del expected
@@ -1008,8 +1112,8 @@ def hic2cool_extractnorms(infile, outfile, exclude_mt=False, show_warnings=False
     WARN = False
     req = open(infile, 'rb')
     buf = mmap.mmap(req.fileno(), 0, access=mmap.ACCESS_READ)
-    used_chrs, resolutions, masteridx, genome, metadata = read_header(req)
-    pair_footer_info, expected, factors, norm_info = read_footer(req, buf, masteridx)
+    used_chrs, resolutions, footerPosition, genome, metadata = read_header(req)
+    pair_footer_info, expected, factors, norm_info = read_footer(req, buf, footerPosition)
     # expected/factors unused for now
     del expected
     del factors

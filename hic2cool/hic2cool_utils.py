@@ -702,10 +702,7 @@ def write_bins(grp, infile, buf, unit, res, chroms, bins, by_chr_bins, norm_info
                 '!!! ERROR. Length of normalization vector %s does not match the'
                 ' number of bins.\nThis is likely a problem with the hic file' % (norm_weight))
             force_exit(error_str)
-        if norm_weight in {'KR', 'VC', 'VC_SQRT'}:
-            norm_data = [1 if np.isnan(x) else x for x in norm_data]
-        else:
-            norm_data = [1 if x==0 or np.isnan(x) else 1/x for x in norm_data]
+        norm_data = [1 if x==0 or np.isnan(x) else 1/x for x in norm_data]
         grp.create_dataset(
             'weight',
             shape=(len(norm_data),),

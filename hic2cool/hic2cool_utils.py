@@ -521,7 +521,7 @@ def build_counts_chunk(mpi, c1, c2, block_info, chr_offset_map, region_indices, 
 
 
 def initialize_res(outfile, infile, buf, unit, chr_info, genome, metadata,
-                   resolution, norm_info, multi_res, show_warnings):
+                   resolution, norm_info, norm, multi_res, show_warnings):
     """
     Use various information to initialize a cooler file in HDF5 format. Tables
     included are chroms, bins, pixels, and indexes.
@@ -556,7 +556,7 @@ def initialize_res(outfile, infile, buf, unit, chr_info, genome, metadata,
         # bins
         bin_table, chr_offsets, by_chr_bins, by_chr_offset_map = create_bins(chr_info, resolution)
         grp = h5resolution.create_group('bins')
-        write_bins(grp, infile, buf, unit, resolution, chr_names, bin_table, by_chr_bins, norm_info, show_warnings)
+        write_bins(grp, infile, buf, unit, resolution, chr_names, bin_table, by_chr_bins, norm_info, norm, show_warnings)
         n_bins = len(bin_table)
         # indexes (just initialize bin1offets)
         grp = h5resolution.create_group('indexes')
@@ -643,7 +643,7 @@ def create_bins(chrs, binsize):
     return np.array(bins_array), np.array(offsets), by_chr_bins, by_chr_offsets
 
 
-def write_bins(grp, infile, buf, unit, res, chroms, bins, by_chr_bins, norm_info, show_warnings):
+def write_bins(grp, infile, buf, unit, res, chroms, bins, by_chr_bins, norm_info, norm_weight, show_warnings):
     """
     Write the bins table, which has columns: chrom, start (in bp), end (in bp),
     and one column for each normalization type, named for the norm type.
@@ -675,6 +675,43 @@ def write_bins(grp, infile, buf, unit, res, chroms, bins, by_chr_bins, norm_info
                        dtype=COORD_DTYPE,
                        data=ends,
                        **H5OPTS)
+    # check if user selected normalization factors and if they are available for the desired resolution
+    if norm_weight:
+        if norm_weight not in NORMS:
+            error_str = (
+                '!!! ERROR.Normalization method %s does not exist in hic file. Please select one of the following: %s'
+                    % (norm_weight, NORMS))
+            force_exit(error_str)
+        norm_data = []
+        for chr_idx in by_chr_bins:
+            chr_bin_end = by_chr_bins[chr_idx]
+            try:
+                # norm_keys = {k:v for k, v in norm_info.items() if k[0] == norm_weight and k[2] == res}
+                norm_key = norm_info[norm_weight, unit, res, chr_idx]
+                with open(infile, "rb") as req:
+                    norm_vector = read_normalization_vector(req, buf, norm_key)
+                norm_data.extend(norm_vector[:chr_bin_end])
+            except KeyError:
+                WARN = True
+                if show_warnings:
+                    print_stderr('!!! WARNING. Normalization vector %s does not exist for chr idx %s.'
+                        % (norm_weight, chr_idx))
+                norm_data.extend([np.nan]*chr_bin_end)
+        if len(norm_data) != n_bins:
+            error_str = (
+                '!!! ERROR. Length of normalization vector %s does not match the'
+                ' number of bins.\nThis is likely a problem with the hic file' % (norm_weight))
+            force_exit(error_str)
+        if norm_weight in {'KR', 'VC', 'VC_SQRT'}:
+            norm_data = [1 if np.isnan(x) else x for x in norm_data]
+        else:
+            norm_data = [1 if x==0 or np.isnan(x) else 1/x for x in norm_data]
+        grp.create_dataset(
+            'weight',
+            shape=(len(norm_data),),
+            dtype=NORM_DTYPE,
+            data=np.array(norm_data, dtype=NORM_DTYPE),
+                **H5OPTS)
     # write columns for normalization vectors
     for norm in NORMS:
         norm_data = []
@@ -960,7 +997,7 @@ def run_hic2cool_updates(updates, infile, writefile):
     print('### Finished! Output written to: %s' % writefile)
 
 
-def hic2cool_convert(infile, outfile, resolution=0, nproc=1, show_warnings=False, silent=False):
+def hic2cool_convert(infile, outfile, resolution=0, norm="", nproc=1, show_warnings=False, silent=False):
     """
     Main function that coordinates the reading of header and footer from infile
     and uses that information to parse the hic matrix.
@@ -1048,7 +1085,7 @@ def hic2cool_convert(infile, outfile, resolution=0, nproc=1, show_warnings=False
         t_start = time.time()
         # initialize cooler file. return per resolution bin offset maps
         chr_offset_map, chr_bins = initialize_res(outfile, infile, mmap_buf, unit, used_chrs,
-                                        genome, metadata, binsize, norm_info, multi_res, show_warnings)
+                                                  genome, metadata, binsize, norm_info, norm, multi_res, show_warnings)
         covered_chr_pairs = []
         for chr_a in used_chrs:
             total_chunk = np.zeros(shape=0, dtype=CHUNK_DTYPE)
